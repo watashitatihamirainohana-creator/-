@@ -46,7 +46,7 @@
 (function () {
   var lanesEl = document.getElementById('lanes');
   var statusEl = document.getElementById('status');
-  var cfg = null, els = [], counts = [], seen = [], seenEls = [];
+  var cfg = null, els = [], counts = [], seen = [], seenEls = [], rescued = [];
   var touches = new Map();   // touch.identifier -> レーン番号
   var ws = null, out = [];
 
@@ -68,7 +68,8 @@
   }
 
   function press(i) {
-    seenEls[i].textContent = ++seen[i];   // ブラウザが受け取った「触れた」回数
+    seen[i]++;                            // 受け取った「触れた」回数 (+N は touchstart 抜けを拾った数)
+    seenEls[i].textContent = seen[i] + (rescued[i] ? ' (+' + rescued[i] + ')' : '');
     counts[i]++;
     if (counts[i] === 1) { out.push('d' + i); els[i].classList.add('on'); }
     else if (cfg.retrigger) out.push('r' + i);   // 押さえ中のレーンを別の指で叩いた → 打ち直す
@@ -88,58 +89,51 @@
     flush();
   }
 
-  // iOS が touchend を落とした場合に備え、実在しない指を掃除する
-  function reconcile(e) {
-    if (touches.size <= e.touches.length) return;
-    var alive = new Set();
-    for (var k = 0; k < e.touches.length; k++) alive.add(e.touches[k].identifier);
-    touches.forEach(function (lane, id) {
-      if (!alive.has(id)) { touches.delete(id); release(lane); }
+  // ---- 入力方式「タッチ」
+  // iOS の WebKit は、ある指が離れるのと同じ瞬間に別の指が着くと touchstart を
+  // 出さないことがある。そこで touchstart / touchend の通知は当てにせず、毎回
+  // e.touches (いま画面に触れている指の一覧) と手元の状態を突き合わせる。
+  function sync(e) {
+    e.preventDefault();
+    if (!cfg || cfg.input === 'pointer') return;
+    var k, t, id, lane;
+    var isStart = e.type === 'touchstart';
+    var started = null;
+    if (isStart) {
+      started = new Set();
+      for (k = 0; k < e.changedTouches.length; k++) {
+        id = e.changedTouches[k].identifier;
+        started.add(id);
+        // 同じ ID の指がもう一度着いた (同じ場所の連打で ID が使い回される) → いったん離す
+        if (touches.has(id)) { release(touches.get(id)); touches.delete(id); }
+      }
+    }
+    var alive = new Map();
+    for (k = 0; k < e.touches.length; k++) alive.set(e.touches[k].identifier, e.touches[k]);
+
+    touches.forEach(function (ln, tid) {          // いなくなった指 → 離す
+      if (!alive.has(tid)) {
+        touches.delete(tid); release(ln);
+        dbg(e.type === 'touchcancel' ? 'tc' : 'te', tid, ln, e.touches.length);
+      }
     });
-  }
-
-  function onStart(e) {
-    e.preventDefault();
-    if (!cfg || cfg.input === 'pointer') return;
-    for (var k = 0; k < e.changedTouches.length; k++) {
-      var t = e.changedTouches[k];
-      if (touches.has(t.identifier)) release(touches.get(t.identifier));
-      var i = laneAt(t.clientX);
-      dbg('ts', t.identifier, i, e.touches.length);
-      touches.set(t.identifier, i);
-      press(i);
-    }
-    reconcile(e);
+    alive.forEach(function (touch, tid) {
+      lane = laneAt(touch.clientX);
+      var old = touches.get(tid);
+      if (old === undefined) {                    // 新しい指 → 押す
+        touches.set(tid, lane);
+        if (!(isStart && started.has(tid))) {     // touchstart が来なかった指を拾った
+          rescued[lane]++;
+          dbg('ts-missed(' + e.type + ')', tid, lane, e.touches.length);
+        } else dbg('ts', tid, lane, e.touches.length);
+        press(lane);
+      } else if (cfg.slide && old !== lane) {     // 隣のレーンへ滑った
+        touches.set(tid, lane); release(old); press(lane);
+      }
+    });
     flush();
   }
-
-  function onMove(e) {
-    e.preventDefault();
-    if (!cfg || !cfg.slide || cfg.input === 'pointer') return;
-    for (var k = 0; k < e.changedTouches.length; k++) {
-      var t = e.changedTouches[k];
-      var old = touches.get(t.identifier);
-      if (old === undefined) continue;
-      var i = laneAt(t.clientX);
-      if (i !== old) { touches.set(t.identifier, i); release(old); press(i); }
-    }
-    flush();
-  }
-
-  function onEnd(e) {
-    e.preventDefault();
-    if (!cfg || cfg.input === 'pointer') return;
-    for (var k = 0; k < e.changedTouches.length; k++) {
-      var id = e.changedTouches[k].identifier;
-      var i = touches.get(id);
-      dbg(e.type === 'touchcancel' ? 'tc' : 'te', id, i, e.touches.length);
-      if (i === undefined) continue;
-      touches.delete(id);
-      release(i);
-    }
-    reconcile(e);
-    flush();
-  }
+  var onStart = sync, onMove = sync, onEnd = sync;
 
   var opt = { passive: false, capture: true };
   document.addEventListener('touchstart', onStart, opt);
@@ -190,7 +184,7 @@
 
   function build() {
     lanesEl.textContent = '';
-    els = []; counts = []; seen = []; seenEls = [];
+    els = []; counts = []; seen = []; seenEls = []; rescued = [];
     cfg.keys.forEach(function (k) {
       var d = document.createElement('div');
       d.className = 'lane';
@@ -199,7 +193,7 @@
       c.textContent = '0';
       d.appendChild(c);
       lanesEl.appendChild(d);
-      els.push(d); counts.push(0); seen.push(0); seenEls.push(c);
+      els.push(d); counts.push(0); seen.push(0); seenEls.push(c); rescued.push(0);
     });
     touches.clear();
   }

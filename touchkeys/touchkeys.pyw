@@ -105,8 +105,11 @@ class App:
         ttk.Combobox(row, textvariable=self.v_input, values=list(INPUTS), state="readonly",
                      width=10).pack(side="left", padx=4)
         self.v_debug = tk.BooleanVar(value=self.conf["debug"])
-        ttk.Checkbutton(right, text="診断ログを記録する(debug.log)",
-                        variable=self.v_debug).grid(row=9, column=0, sticky="w")
+        row = ttk.Frame(right)
+        row.grid(row=9, column=0, sticky="w")
+        ttk.Checkbutton(row, text="診断ログを記録する(debug.log)",
+                        variable=self.v_debug).pack(side="left")
+        ttk.Button(row, text="ログを開く", command=self.open_log).pack(side="left", padx=6)
         row = ttk.Frame(right)
         row.grid(row=10, column=0, sticky="w", pady=(10, 0))
         ttk.Button(row, text="適用", command=self.apply).pack(side="left")
@@ -199,6 +202,15 @@ class App:
                     json.dump(self.conf, f, ensure_ascii=False, indent=1)
             except OSError:
                 pass
+
+    def open_log(self):
+        if not os.path.exists(LOG):
+            messagebox.showinfo("touchkeys", "まだログがありません。\n「診断ログを記録する」にチェックして「適用」を押し、"
+                                "iPad を叩いてからもう一度押してください。\n\n保存先: " + LOG)
+        elif IS_WIN:
+            os.startfile(LOG)
+        else:
+            messagebox.showinfo("touchkeys", "保存先: " + LOG)
 
     def write_log(self, msg):
         with self.log_lock:
