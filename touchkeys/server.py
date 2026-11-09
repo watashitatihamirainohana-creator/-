@@ -27,14 +27,17 @@ WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 class DryRunBackend:
     """キーを押さずにログだけ出す (動作確認用)。"""
 
-    def __init__(self, keys):
+    def __init__(self, keys, quiet=False):
         self.keys = keys
+        self.quiet = quiet
 
     def press(self, i):
-        print("down %s" % self.keys[i], flush=True)
+        if not self.quiet:
+            print("down %s" % self.keys[i], flush=True)
 
     def release(self, i):
-        print("up   %s" % self.keys[i], flush=True)
+        if not self.quiet:
+            print("up   %s" % self.keys[i], flush=True)
 
 
 class WindowsBackend:
@@ -125,6 +128,12 @@ class Lanes:
         self.want = [False] * n      # クライアントが押していたい状態
         self.down = [False] * n      # 実際に PC へ送ったキー状態
         self.pending = [False] * n   # 再打鍵の「押す」待ち
+        self.hits = [0] * n          # 押下回数 (GUI の表示用)
+
+    def _press(self, i):
+        self.backend.press(i)
+        self.down[i] = True
+        self.hits[i] += 1
 
     def handle(self, op, i):
         with self.lock:
@@ -143,15 +152,13 @@ class Lanes:
                     threading.Timer(self.gap, self._fire, (i,)).start()
                     return
             if not self.down[i] and not self.pending[i]:
-                self.backend.press(i)
-                self.down[i] = True
+                self._press(i)
 
     def _fire(self, i):
         with self.lock:
             self.pending[i] = False
             if self.want[i] and not self.down[i]:
-                self.backend.press(i)
-                self.down[i] = True
+                self._press(i)
 
 
 # ---------------------------------------------------------------- HTTP / WebSocket
@@ -160,6 +167,19 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     cfg = None
     lanes = None
+    quiet = False
+    conns = set()
+    conns_lock = threading.Lock()
+
+    @classmethod
+    def kick_all(cls):
+        """全クライアントを切断する (設定変更後、自動再接続で新しい設定を配る)。"""
+        with cls.conns_lock:
+            for c in list(cls.conns):
+                try:
+                    c.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
 
     def log_message(self, *a):
         pass
@@ -213,10 +233,14 @@ class Handler(BaseHTTPRequestHandler):
         self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.close_connection = True
         peer = self.client_address[0]
-        print("[接続] %s" % peer, flush=True)
+        if not self.quiet:
+            print("[接続] %s" % peer, flush=True)
         held = set()
+        cfg, lanes = self.cfg, self.lanes   # この接続の間は固定
+        with self.conns_lock:
+            self.conns.add(self.connection)
         try:
-            self.ws_send(json.dumps(self.cfg))
+            self.ws_send(json.dumps(cfg))
             while True:
                 op, data = self.ws_read()
                 if op is None or op == 8:
@@ -232,16 +256,19 @@ class Handler(BaseHTTPRequestHandler):
                     if c not in "dur" or not num.isdigit():
                         continue
                     i = int(num)
-                    if i >= len(self.cfg["keys"]):
+                    if i >= len(cfg["keys"]):
                         continue
                     (held.discard if c == "u" else held.add)(i)
-                    self.lanes.handle(c, i)
+                    lanes.handle(c, i)
         except OSError:
             pass
         finally:
+            with self.conns_lock:
+                self.conns.discard(self.connection)
             for i in held:  # 切断時に押しっぱなしを残さない
-                self.lanes.handle("u", i)
-            print("[切断] %s" % peer, flush=True)
+                lanes.handle("u", i)
+            if not self.quiet:
+                print("[切断] %s" % peer, flush=True)
 
 
 def lan_ip():
@@ -253,6 +280,33 @@ def lan_ip():
         return "127.0.0.1"
     finally:
         s.close()
+
+
+def all_ips():
+    """この PC の IPv4 アドレス候補。既定の経路のものを先頭にする。"""
+    ips = [lan_ip()]
+    try:
+        for ip in socket.gethostbyname_ex(socket.gethostname())[2]:
+            if ip not in ips and not ip.startswith("127."):
+                ips.append(ip)
+    except OSError:
+        pass
+    return ips
+
+
+def parse_keys(keys):
+    if len(keys) == 1 and len(keys[0]) > 1 and keys[0].lower() not in WindowsBackend.NAMED \
+            and not (keys[0][0] in "fF" and keys[0][1:].isdigit()):
+        return list(keys[0])  # "dfjk" のような連結表記も許可
+    return keys
+
+
+def make_backend(keys, dry_run, quiet=False):
+    if dry_run:
+        return DryRunBackend(keys, quiet)
+    if sys.platform == "win32":
+        return WindowsBackend(keys)
+    raise SystemExit("キー入力の注入は Windows のみ対応です。--dry-run で動作確認だけできます。")
 
 
 def main():
@@ -270,16 +324,8 @@ def main():
                     help="キーを押さずログだけ出す (動作確認用)")
     a = ap.parse_args()
 
-    keys = a.keys
-    if len(keys) == 1 and len(keys[0]) > 1 and keys[0].lower() not in WindowsBackend.NAMED:
-        keys = list(keys[0])  # --keys dfjk も許可
-
-    if a.dry_run:
-        backend = DryRunBackend(keys)
-    elif sys.platform == "win32":
-        backend = WindowsBackend(keys)
-    else:
-        raise SystemExit("キー入力の注入は Windows のみ対応です。--dry-run で動作確認だけできます。")
+    keys = parse_keys(a.keys)
+    backend = make_backend(keys, a.dry_run)
 
     Handler.cfg = {"keys": keys, "slide": a.slide, "retrigger": not a.no_retrigger}
     Handler.lanes = Lanes(backend, len(keys), a.retrigger_ms / 1000.0)
