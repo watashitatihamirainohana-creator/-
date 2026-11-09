@@ -67,6 +67,17 @@
       ws.send('#' + type + ' id=' + id + ' lane=' + lane + ' n=' + n + ' t=' + performance.now().toFixed(1));
   }
 
+  // 指 1 本ぶん: ID:x,y,接触半径,圧力
+  function fmt(list) {
+    var a = [];
+    for (var k = 0; k < list.length; k++) {
+      var t = list[k];
+      a.push(t.identifier + ':' + Math.round(t.clientX) + ',' + Math.round(t.clientY) + ',r' +
+             (t.radiusX || 0).toFixed(1) + ',f' + (t.force || 0).toFixed(2));
+    }
+    return a.join(' ');
+  }
+
   function press(i) {
     seen[i]++;                            // 受け取った「触れた」回数 (+N は touchstart 抜けを拾った数)
     seenEls[i].textContent = seen[i] + (rescued[i] ? ' (+' + rescued[i] + ')' : '');
@@ -98,6 +109,9 @@
     if (!cfg || cfg.input === 'pointer') return;
     var k, t, id, lane;
     var isStart = e.type === 'touchstart';
+    if (cfg.debug && ws && ws.readyState === 1)   // 生イベントを丸ごと記録 (move も含む)
+      ws.send('#' + e.type + ' changed=[' + fmt(e.changedTouches) + '] all=[' + fmt(e.touches) +
+              '] t=' + performance.now().toFixed(1));
     var started = null;
     if (isStart) {
       started = new Set();
