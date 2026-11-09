@@ -64,8 +64,10 @@ class App:
             cb = ttk.Combobox(row, textvariable=self.ip, values=self.ips, state="readonly", width=15)
             cb.pack(side="left")
             cb.bind("<<ComboboxSelected>>", lambda e: self.draw_qr())
-        ttk.Label(left, text="iPad のカメラで読み取る(PC と同じ Wi-Fi)",
+        ttk.Label(left, text="ブラウザ版: iPad のカメラで読み取る",
                   foreground="#555").grid(row=3, column=0, pady=(4, 0))
+        self.app_addr = tk.StringVar()
+        ttk.Label(left, textvariable=self.app_addr, foreground="#555").grid(row=4, column=0)
 
         # ---- 右: 設定
         right = ttk.Frame(top)
@@ -139,14 +141,18 @@ class App:
     def start_server(self):
         server.Handler.quiet = True
         port = self.conf["port"]
-        for p in range(port, port + 10):
+        for p in range(port, port + 20, 2):   # p = ブラウザ用, p+1 = アプリ用
             try:
                 self.srv = server.ThreadingHTTPServer(("0.0.0.0", p), server.Handler)
-                break
             except OSError:
                 continue
+            try:
+                self.line_srv = server.start_line_server(p + 1)
+                break
+            except OSError:
+                self.srv.server_close()
         else:
-            messagebox.showerror("touchkeys", "ポート %d〜%d が使えません。" % (port, port + 9))
+            messagebox.showerror("touchkeys", "ポート %d〜%d が使えません。" % (port, port + 19))
             return False
         self.srv.daemon_threads = True
         self.port = p
@@ -222,6 +228,8 @@ class App:
     def draw_qr(self):
         url = "http://%s:%d/" % (self.ip.get(), self.port)
         self.url.set(url)
+        self.app_addr.set("アプリ版: %s%s を入力" % (
+            self.ip.get(), "" if self.port == 8765 else ":%d" % (self.port + 1)))
         m = qr.make(url)
         n = len(m) + 8                      # 余白 4 セルずつ
         cell = 240 // n

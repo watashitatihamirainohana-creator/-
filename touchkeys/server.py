@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import socket
+import socketserver
 import struct
 import sys
 import threading
@@ -283,6 +284,63 @@ class Handler(BaseHTTPRequestHandler):
                 print("[切断] %s" % peer, flush=True)
 
 
+class LineHandler(socketserver.StreamRequestHandler):
+    """ネイティブアプリ (Swift Playgrounds 版) 用。素の TCP で 1 行 1 メッセージ。
+
+    接続直後にサーバーが設定を JSON 1 行で送り、以後クライアントが "d0 u3" のような行を送る。
+    """
+
+    def handle(self):
+        H = Handler
+        self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        peer = self.client_address[0]
+        if not H.quiet:
+            print("[接続] %s (アプリ)" % peer, flush=True)
+        held = set()
+        cfg, lanes = H.cfg, H.lanes
+        with H.conns_lock:
+            H.conns.add(self.connection)
+        try:
+            self.wfile.write(json.dumps(cfg).encode() + b"\n")
+            for line in self.rfile:
+                if len(line) > 4096:
+                    break
+                if H.log:
+                    H.log("rx " + line.decode("ascii", "replace").strip())
+                if line[:1] == b"#":
+                    continue
+                for tok in line.decode("ascii", "ignore").split():
+                    c, num = tok[0], tok[1:]
+                    if c not in "dur" or not num.isdigit():
+                        continue
+                    i = int(num)
+                    if i >= len(cfg["keys"]):
+                        continue
+                    (held.discard if c == "u" else held.add)(i)
+                    lanes.handle(c, i)
+        except OSError:
+            pass
+        finally:
+            with H.conns_lock:
+                H.conns.discard(self.connection)
+            for i in held:
+                lanes.handle("u", i)
+            if not H.quiet:
+                print("[切断] %s (アプリ)" % peer, flush=True)
+
+
+class LineServer(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+
+def start_line_server(port):
+    """アプリ用の TCP サーバーを別スレッドで起動して返す。"""
+    srv = LineServer(("0.0.0.0", port), LineHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
 def lan_ip():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -346,8 +404,10 @@ def main():
     Handler.lanes = Lanes(backend, len(keys), a.retrigger_ms / 1000.0)
     srv = ThreadingHTTPServer(("0.0.0.0", a.port), Handler)
     srv.daemon_threads = True
+    start_line_server(a.port + 1)
     print("レーン: %s" % " | ".join(keys))
     print("iPad の Safari でここを開く →  http://%s:%d/" % (lan_ip(), a.port))
+    print("アプリ版 (Swift Playgrounds) に入れるアドレス →  %s:%d" % (lan_ip(), a.port + 1))
     print("終了は Ctrl+C", flush=True)
     try:
         srv.serve_forever()
