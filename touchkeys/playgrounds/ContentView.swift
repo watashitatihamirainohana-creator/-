@@ -330,7 +330,6 @@ struct ContentView: View {
         .modifier(GameScreen())
         .statusBar(hidden: true)
         .onAppear {
-            UIApplication.shared.isIdleTimerDisabled = true   // 画面を自動ロックさせない
             if !address.isEmpty { link.start(address: address) }
         }
     }
