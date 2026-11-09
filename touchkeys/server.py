@@ -121,9 +121,10 @@ class WindowsBackend:
 class Lanes:
     """レーンごとのキー状態。再打鍵 (離す→少し待つ→押す) で押しっぱなしにならないよう管理する。"""
 
-    def __init__(self, backend, n, gap):
+    def __init__(self, backend, n, gap, log=None):
         self.backend = backend
         self.gap = gap
+        self.log = log               # 診断ログ用 (文字列を受け取る関数)
         self.lock = threading.Lock()
         self.want = [False] * n      # クライアントが押していたい状態
         self.down = [False] * n      # 実際に PC へ送ったキー状態
@@ -134,19 +135,25 @@ class Lanes:
         self.backend.press(i)
         self.down[i] = True
         self.hits[i] += 1
+        if self.log:
+            self.log("key down %d" % i)
+
+    def _release(self, i):
+        self.backend.release(i)
+        self.down[i] = False
+        if self.log:
+            self.log("key up   %d" % i)
 
     def handle(self, op, i):
         with self.lock:
             if op == "u":
                 self.want[i] = False
                 if self.down[i]:
-                    self.backend.release(i)
-                    self.down[i] = False
+                    self._release(i)
                 return
             self.want[i] = True
             if op == "r" and self.down[i]:
-                self.backend.release(i)
-                self.down[i] = False
+                self._release(i)
                 if self.gap > 0:
                     self.pending[i] = True
                     threading.Timer(self.gap, self._fire, (i,)).start()
@@ -168,6 +175,7 @@ class Handler(BaseHTTPRequestHandler):
     cfg = None
     lanes = None
     quiet = False
+    log = None                       # 診断ログ用 (文字列を受け取る関数)
     conns = set()
     conns_lock = threading.Lock()
 
@@ -250,6 +258,10 @@ class Handler(BaseHTTPRequestHandler):
                     continue
                 if op != 1:
                     continue
+                if self.log:
+                    self.log("rx " + data.decode("ascii", "replace"))
+                if data[:1] == b"#":      # iPad 側の生イベント (診断用)。キー操作はしない
+                    continue
                 # 1 フレームに複数イベント可: "d0 d2 u1" (d=押す u=離す r=再打鍵)
                 for tok in data.decode("ascii", "ignore").split():
                     c, num = tok[0], tok[1:]
@@ -320,6 +332,8 @@ def main():
                     help="押さえ中のレーンを別の指で叩いても打ち直さない")
     ap.add_argument("--retrigger-ms", type=float, default=8,
                     help="打ち直し時に離す→押すの間へ入れる間隔ミリ秒 (既定 8)")
+    ap.add_argument("--input", choices=["touch", "pointer"], default="touch",
+                    help="iPad 側で使うイベントの種類 (既定 touch)")
     ap.add_argument("--dry-run", action="store_true",
                     help="キーを押さずログだけ出す (動作確認用)")
     a = ap.parse_args()
@@ -327,7 +341,8 @@ def main():
     keys = parse_keys(a.keys)
     backend = make_backend(keys, a.dry_run)
 
-    Handler.cfg = {"keys": keys, "slide": a.slide, "retrigger": not a.no_retrigger}
+    Handler.cfg = {"keys": keys, "slide": a.slide, "retrigger": not a.no_retrigger,
+                   "input": a.input, "debug": False}
     Handler.lanes = Lanes(backend, len(keys), a.retrigger_ms / 1000.0)
     srv = ThreadingHTTPServer(("0.0.0.0", a.port), Handler)
     srv.daemon_threads = True

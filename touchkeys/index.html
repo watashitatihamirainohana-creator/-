@@ -24,11 +24,13 @@
     box-sizing: border-box; border-left: 1px solid #333;
     background: #111; color: #777;
     font-size: 5vw; font-weight: 700; padding-bottom: 6vh;
+    flex-direction: column; justify-content: flex-end; align-items: center;
     pointer-events: none;            /* タッチは全部 document で受ける */
   }
   .lane:first-child { border-left: 0; }
   .lane:nth-child(even) { background: #171717; }
   .lane.on { background: #2f7cf6; color: #fff; }
+  .lane small { font-size: 2.2vw; font-weight: 400; opacity: .7; }
   #status {
     position: fixed; top: 0; left: 0; right: 0; padding: 6px;
     text-align: center; font-size: 14px; color: #fff; background: #b3261e;
@@ -44,7 +46,7 @@
 (function () {
   var lanesEl = document.getElementById('lanes');
   var statusEl = document.getElementById('status');
-  var cfg = null, els = [], counts = [];
+  var cfg = null, els = [], counts = [], seen = [], seenEls = [];
   var touches = new Map();   // touch.identifier -> レーン番号
   var ws = null, out = [];
 
@@ -59,7 +61,14 @@
     return i < 0 ? 0 : i >= cfg.keys.length ? cfg.keys.length - 1 : i;
   }
 
+  // 診断: ブラウザが受け取った生イベントをそのまま PC に送る
+  function dbg(type, id, lane, n) {
+    if (cfg.debug && ws && ws.readyState === 1)
+      ws.send('#' + type + ' id=' + id + ' lane=' + lane + ' n=' + n + ' t=' + performance.now().toFixed(1));
+  }
+
   function press(i) {
+    seenEls[i].textContent = ++seen[i];   // ブラウザが受け取った「触れた」回数
     counts[i]++;
     if (counts[i] === 1) { out.push('d' + i); els[i].classList.add('on'); }
     else if (cfg.retrigger) out.push('r' + i);   // 押さえ中のレーンを別の指で叩いた → 打ち直す
@@ -91,11 +100,12 @@
 
   function onStart(e) {
     e.preventDefault();
-    if (!cfg) return;
+    if (!cfg || cfg.input === 'pointer') return;
     for (var k = 0; k < e.changedTouches.length; k++) {
       var t = e.changedTouches[k];
       if (touches.has(t.identifier)) release(touches.get(t.identifier));
       var i = laneAt(t.clientX);
+      dbg('ts', t.identifier, i, e.touches.length);
       touches.set(t.identifier, i);
       press(i);
     }
@@ -105,7 +115,7 @@
 
   function onMove(e) {
     e.preventDefault();
-    if (!cfg || !cfg.slide) return;
+    if (!cfg || !cfg.slide || cfg.input === 'pointer') return;
     for (var k = 0; k < e.changedTouches.length; k++) {
       var t = e.changedTouches[k];
       var old = touches.get(t.identifier);
@@ -118,10 +128,11 @@
 
   function onEnd(e) {
     e.preventDefault();
-    if (!cfg) return;
+    if (!cfg || cfg.input === 'pointer') return;
     for (var k = 0; k < e.changedTouches.length; k++) {
       var id = e.changedTouches[k].identifier;
       var i = touches.get(id);
+      dbg(e.type === 'touchcancel' ? 'tc' : 'te', id, i, e.touches.length);
       if (i === undefined) continue;
       touches.delete(id);
       release(i);
@@ -135,6 +146,38 @@
   document.addEventListener('touchmove', onMove, opt);
   document.addEventListener('touchend', onEnd, opt);
   document.addEventListener('touchcancel', onEnd, opt);
+  // ---- 入力方式「ポインター」: Pointer Events で同じことをする
+  function onPDown(e) {
+    if (!cfg || cfg.input !== 'pointer') return;
+    e.preventDefault();
+    if (touches.has(e.pointerId)) release(touches.get(e.pointerId));
+    var i = laneAt(e.clientX);
+    dbg('pd', e.pointerId, i, touches.size + 1);
+    touches.set(e.pointerId, i);
+    press(i);
+    flush();
+  }
+  function onPMove(e) {
+    if (!cfg || cfg.input !== 'pointer' || !cfg.slide) return;
+    var old = touches.get(e.pointerId);
+    if (old === undefined) return;
+    var i = laneAt(e.clientX);
+    if (i !== old) { touches.set(e.pointerId, i); release(old); press(i); flush(); }
+  }
+  function onPUp(e) {
+    if (!cfg || cfg.input !== 'pointer') return;
+    var i = touches.get(e.pointerId);
+    dbg(e.type === 'pointercancel' ? 'pc' : 'pu', e.pointerId, i, touches.size - 1);
+    if (i === undefined) return;
+    touches.delete(e.pointerId);
+    release(i);
+    flush();
+  }
+  document.addEventListener('pointerdown', onPDown, opt);
+  document.addEventListener('pointermove', onPMove, opt);
+  document.addEventListener('pointerup', onPUp, opt);
+  document.addEventListener('pointercancel', onPUp, opt);
+
   // ブラウザ標準のジェスチャー類を全部止める
   ['gesturestart', 'gesturechange', 'gestureend', 'contextmenu', 'selectstart',
    'dblclick', 'click', 'dragstart', 'wheel'].forEach(function (n) {
@@ -147,13 +190,16 @@
 
   function build() {
     lanesEl.textContent = '';
-    els = []; counts = [];
+    els = []; counts = []; seen = []; seenEls = [];
     cfg.keys.forEach(function (k) {
       var d = document.createElement('div');
       d.className = 'lane';
-      d.textContent = k.toUpperCase();
+      d.appendChild(document.createTextNode(k.toUpperCase()));
+      var c = document.createElement('small');
+      c.textContent = '0';
+      d.appendChild(c);
       lanesEl.appendChild(d);
-      els.push(d); counts.push(0);
+      els.push(d); counts.push(0); seen.push(0); seenEls.push(c);
     });
     touches.clear();
   }

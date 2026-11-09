@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import threading
+import time
 import tkinter as tk
 from tkinter import messagebox, ttk
 
@@ -12,8 +13,10 @@ import qr  # noqa: E402
 import server  # noqa: E402
 
 CONF = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
-DEFAULTS = {"keys": "d f j k", "slide": False, "retrigger": True,
-            "retrigger_ms": 8, "test": sys.platform != "win32", "port": 8765}
+LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug.log")
+INPUTS = {"タッチ": "touch", "ポインター": "pointer"}
+DEFAULTS = {"keys": "d f j k", "slide": False, "retrigger": True, "retrigger_ms": 8,
+            "test": sys.platform != "win32", "port": 8765, "input": "touch", "debug": False}
 IS_WIN = sys.platform == "win32"
 
 
@@ -35,6 +38,9 @@ class App:
         self.conf = load_conf()
         self.lanes = None
         self.keys = []
+        self.logf = None
+        self.log_lock = threading.Lock()
+        self.t0 = time.perf_counter()
         root.title("touchkeys")
         root.resizable(False, False)
 
@@ -92,7 +98,17 @@ class App:
             ttk.Label(right, text="※ キー送信は Windows のみ対応", foreground="#b3261e").grid(
                 row=7, column=0, sticky="w", padx=(22, 0))
         row = ttk.Frame(right)
-        row.grid(row=8, column=0, sticky="w", pady=(10, 0))
+        row.grid(row=8, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(row, text="iPad の入力方式").pack(side="left")
+        self.v_input = tk.StringVar(value=next(
+            (k for k, v in INPUTS.items() if v == self.conf["input"]), "タッチ"))
+        ttk.Combobox(row, textvariable=self.v_input, values=list(INPUTS), state="readonly",
+                     width=10).pack(side="left", padx=4)
+        self.v_debug = tk.BooleanVar(value=self.conf["debug"])
+        ttk.Checkbutton(right, text="診断ログを記録する(debug.log)",
+                        variable=self.v_debug).grid(row=9, column=0, sticky="w")
+        row = ttk.Frame(right)
+        row.grid(row=10, column=0, sticky="w", pady=(10, 0))
         ttk.Button(row, text="適用", command=self.apply).pack(side="left")
         self.status = tk.StringVar()
         ttk.Label(row, textvariable=self.status).pack(side="left", padx=10)
@@ -152,20 +168,43 @@ class App:
             messagebox.showerror("touchkeys", str(ex) or "間隔 ms には 0〜1000 の数値を入れてください。")
             return
         self.keys = keys
-        self.lanes = server.Lanes(backend, len(keys), ms / 1000.0)
+        debug = self.v_debug.get()
+        with self.log_lock:
+            if self.logf:
+                self.logf.close()
+                self.logf = None
+            if debug:
+                try:
+                    self.logf = open(LOG, "a", encoding="utf-8")
+                except OSError:
+                    debug = False
+        log = self.write_log if debug else None
+        server.Handler.log = log
+        self.lanes = server.Lanes(backend, len(keys), ms / 1000.0, log)
         server.Handler.cfg = {"keys": keys, "slide": self.v_slide.get(),
-                              "retrigger": self.v_retrigger.get()}
+                              "retrigger": self.v_retrigger.get(),
+                              "input": INPUTS[self.v_input.get()], "debug": debug}
+        if log:
+            log("==== %s %s" % (time.strftime("%Y-%m-%d %H:%M:%S"), json.dumps(
+                dict(server.Handler.cfg, test=self.v_test.get(), retrigger_ms=ms))))
         server.Handler.lanes = self.lanes
         server.Handler.kick_all()     # iPad 側は自動で再接続して新しい設定を受け取る
         self.build_monitor()
         self.conf.update(keys=" ".join(keys), slide=self.v_slide.get(),
-                         retrigger=self.v_retrigger.get(), retrigger_ms=ms, test=self.v_test.get())
+                         retrigger=self.v_retrigger.get(), retrigger_ms=ms, test=self.v_test.get(),
+                         input=INPUTS[self.v_input.get()], debug=debug)
         if not first:
             try:
                 with open(CONF, "w", encoding="utf-8") as f:
                     json.dump(self.conf, f, ensure_ascii=False, indent=1)
             except OSError:
                 pass
+
+    def write_log(self, msg):
+        with self.log_lock:
+            if self.logf:
+                self.logf.write("%10.1f %s\n" % ((time.perf_counter() - self.t0) * 1000, msg))
+                self.logf.flush()
 
     # ---- 表示
     def draw_qr(self):
